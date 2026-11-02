@@ -25,7 +25,7 @@ The GPU was never the problem. The failures were all in host/container memory du
 3. Two 294-frame attempts were stopped by my own safety monitor when *host* swap ran out — not model OOMs.
 4. Fix: +16GiB host SSD swap (≈23.5GiB total), back to the 34GiB container baseline, `--cache-none`, and dropping `--fast-disk`.
 
-Staged runs with full data (39→124→209→294→362 frames), the working Docker/ComfyUI config, and cgroup diagnostic commands are in the repo: <填仓库链接>
+Staged runs with full data (39→124→209→294→362 frames), the working Docker/ComfyUI config, and cgroup diagnostic commands are in the repo: https://github.com/wwx0817/minimax-h3-r9700
 
 To be clear about scope: this is **not** a first R9700+H3 run (Windows and dual-GPU reports exist, and boxwrench/R9700's single-card work predates this), and it's n=1 at 608×352 — an engineering/debugging record, not a benchmark. Model revisions/SHA-256 and the full Dockerfile are still missing; listed as open items in the repo.
 
@@ -46,6 +46,6 @@ Sample video attached (608×352, 15.083s).
 
 关键经验：GPU 显存、Docker 容器限额、宿主机 Swap 是三种不同的「内存不足」，要分开监控——我曾把容器 RAM 从 34GiB 提到 38GiB，却因总限额不变把容器 Swap 压到 4GiB，越改越糟；最终靠恢复基线配比 + 给宿主机扩 16GiB Swap 跑通。
 
-完整报告（分阶段实验数据、失败路径、最终配置、诊断命令）：<填仓库链接>
+完整报告（分阶段实验数据、失败路径、最终配置、诊断命令）：https://github.com/wwx0817/minimax-h3-r9700
 
 说明：这不是 R9700 跑 H3 的首例，社区已有优秀工作在先（见报告致谢）；本报告的定位是低内存条件下的部署排障记录，362 帧目前仅验收 1 次，未做稳定性与高分辨率测试。
