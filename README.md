@@ -6,6 +6,10 @@
 
 > **English TL;DR** — A single AMD Radeon AI PRO R9700 (32GB VRAM) workstation with only **48GB of system RAM** completed a full-length MiniMax H3 generation: FL2VA FP8 + Qwen3-VL 32B FP8 text encoder, 608×352, 24 FPS, **362 frames / 15.083s with a native audio track**, 20 steps, 442.26s end-to-end, no Docker OOM kill. The hard part was not the GPU — it was host/container memory management while the 32B text encoder and the H3 DiT swap in and out: Docker cgroup RAM/Swap budgeting, `--cache-none`, dropping `--fast-disk`, and adding 16GiB of host SSD swap. This is an engineering field report, **not** a first-run record and **not** a new inference algorithm. Full log: [FULL-REPORT.md](FULL-REPORT.md). Community post drafts: [POST.md](POST.md).
 
+## 2026-11-24 更新：1080p 5/7/8 秒全部成功
+
+**Update (2026-11-24)** — Same workstation, now at 1080p: **1920×1088 native (delivered as 1920×1080) / 24 FPS / 20 steps, 5s (124f), 7s (175f) and 8s (192f) all succeeded**, with native AAC stereo audio. The 8s run took **5,628s (93.8 min), peak VRAM 28.97GiB**. 10s (243f) is the hard ceiling on a 32GB card: VRAM hit 31.3G/31.86G, CUDA OOM, and the GNOME desktop crashed (framebuffer starvation) taking the machine down with it. Two root causes nailed down this round: stop `gdm3` before long generations (the desktop competes for VRAM), and restart the container to clear memory — `/free` cannot release the ~24G of anonymous memory left behind. Full report: [FULL-REPORT-1080p.md](FULL-REPORT-1080p.md). Community post: [Hugging Face discussion #76](https://huggingface.co/Comfy-Org/MiniMax-H3/discussions/76) (with 8s + 7s sample clips).
+
 ## 关键结果
 
 | 项目 | 实测 |
@@ -134,7 +138,7 @@ rocm-smi --showtemp --showfan --showpower --showuse        # GPU 状态
 ## 局限（发布时不删）
 
 - 362 帧仅成功验收 **1 次**；未做连续多轮稳定性测试；
-- 分辨率 608×352 低于 H3 原生 768 短边；未测更高分辨率；
+- 分辨率：15 秒档 608×352 低于 H3 原生 768 短边；1080p 档见 FULL-REPORT-1080p.md（5/7/8 秒成功，10 秒为显存上限）；
 - 模型 revision / SHA-256、完整 Dockerfile、可直接运行的工作流 JSON 尚未补齐——可复现程度目前为**中等**；
 - 温度与功耗各有一处未决读数（GUI 103°C vs 终端 97°C；`power1_average` 曾采到 389W 而 cap 为 300W），口径未统一，不据此下结论；
 - 音频仅核验轨道存在，未做可听性与同步的主观验收。
@@ -151,7 +155,11 @@ rocm-smi --showtemp --showfan --showpower --showuse        # GPU 状态
 
 `sample-r9700-h3-15s.mp4`：608×352 / 24 FPS / 362 帧 / 15.083 秒 / 含原生音频（约 0.9MB）。可通过本仓库的 **Releases** 下载，或在 Hugging Face 讨论帖中直接观看。
 
+`sample-r9700-h3-1080p-8s.mp4` / `sample-r9700-h3-1080p-7s.mp4`：1920×1080 / 24 FPS / 8.000 秒 / 7.292 秒 / 含原生音频（各约 4MB）。可在 Hugging Face 讨论帖 [#76](https://huggingface.co/Comfy-Org/MiniMax-H3/discussions/76) 中直接观看。
+
 ## 文件
 
 - [FULL-REPORT.md](FULL-REPORT.md) — 完整复盘原文：时间线、全部实验、诊断命令、问题速查表（333 行）
 - [POST.md](POST.md) — 社区发帖文案（Hugging Face 讨论版 / 简介版）
+- [FULL-REPORT-1080p.md](FULL-REPORT-1080p.md) — 1080p 完整复盘原文（2026-11-24）：5/7/8 秒成功、10 秒显存上限、桌面抢显存与清内存根因
+- [POST-1080p.md](POST-1080p.md) — 1080p 社区发帖文案（Hugging Face 讨论 #76 / 简介版）
