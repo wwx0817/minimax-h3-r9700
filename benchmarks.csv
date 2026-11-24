@@ -1,0 +1,15 @@
+run_id,configuration_group,native_width,native_height,frames,fps,steps,mode,wall_seconds,peak_global_vram_gib,status,notes
+H720-124,historical,1280,704,124,24,20,standard,664.6,,PASS,cgroup swap peak 5.85 GiB
+H720-243,historical,1280,704,243,24,20,standard,1962.1,,PASS,cgroup swap peak 5.43 GiB
+H1080-039,historical,1920,1088,39,24,20,standard,455.5,,PASS,probe
+H1080-124,historical,1920,1088,124,24,20,standard,2600.5,27.8,PASS,peak approximate
+H1080-175,historical,1920,1088,175,24,20,standard,4759,27.96,PASS,historical desktop mitigation
+H1080-192,historical,1920,1088,192,24,20,standard,5628,28.97,PASS,120min harness allowance
+H1080-192-timeout,historical,1920,1088,192,24,20,standard,,,TIMEOUT,interrupted at reported 5341s; not completion time
+H1080-243,historical,1920,1088,243,24,20,standard,,31.3,FAIL,GPU allocation error and desktop disruption
+HT8,historical,1920,1088,192,24,8,turbo,2358,28.97,PASS,old configuration
+HT8C,historical,1920,1088,192,24,8,turbo_easycache,2364,28.91,PASS,reuse threshold 0.2
+HT4,historical,1920,1088,192,24,4,turbo,1281,28.91,PASS,no reserve3; historical fastest
+R3-124,current_reserve3,1920,1088,124,24,20,standard,2613,,PASS,GNOME active; no observed reboot
+R3-192,current_reserve3,1920,1088,192,24,4,turbo,,,NOT_ESTABLISHED,no valid completed benchmark in reviewed evidence
+P0-192,invalid_diagnostic,1920,1088,192,24,4,turbo,,30.5,ABORTED,concurrent containers; MemAvailable 736 MiB; not benchmark

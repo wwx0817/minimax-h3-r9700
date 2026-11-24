@@ -1,165 +1,183 @@
-# MiniMax H3 on a Single AMD R9700 32GB with Only 48GB System RAM
+# MiniMax H3 on AMD Radeon AI PRO R9700
 
-**AMD R9700 32GB + 48GB RAM 的 MiniMax H3 15 秒生成实测与低内存部署排障记录**
+**Native 1080p-tier audio–video generation, GPU/desktop memory contention, Turbo LoRA, and recovery diagnostics**  
+Research snapshot: **2026-11-25** · Single workstation · ComfyUI / PyTorch / ROCm / Docker
 
-*Deployment & OOM-troubleshooting field report — Ubuntu / ROCm / Docker / ComfyUI — 2026-10-31 → 2026-11-03*
+This repository documents a local MiniMax H3 FL2VA deployment on a single R9700 with limited host memory. It is an empirical engineering report, not a new model, a general performance guarantee, or a claim to the world record. The historical fastest completed native 1920×1088 / 192-frame / 24 fps workflow took **1,281 s (21m 21s)** using Turbo 4-step and FP8-scaled weights. Current production uses an additional 3 GiB application-level VRAM budget, and its equivalent four-step completion time has not yet been established.
 
-> **English TL;DR** — A single AMD Radeon AI PRO R9700 (32GB VRAM) workstation with only **48GB of system RAM** completed a full-length MiniMax H3 generation: FL2VA FP8 + Qwen3-VL 32B FP8 text encoder, 608×352, 24 FPS, **362 frames / 15.083s with a native audio track**, 20 steps, 442.26s end-to-end, no Docker OOM kill. The hard part was not the GPU — it was host/container memory management while the 32B text encoder and the H3 DiT swap in and out: Docker cgroup RAM/Swap budgeting, `--cache-none`, dropping `--fast-disk`, and adding 16GiB of host SSD swap. This is an engineering field report, **not** a first-run record and **not** a new inference algorithm. Full log: [FULL-REPORT.md](FULL-REPORT.md). Community post drafts: [POST.md](POST.md).
+- Community: [Hugging Face discussion #76](https://huggingface.co/Comfy-Org/MiniMax-H3/discussions/76)
+- Upstream models: [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
+- Research manuscript: `paper.md` / `paper.pdf` in the proposed release bundle (publish and verify before linking).
 
-## 2026-11-24 更新：1080p 5/7/8 秒全部成功
+## 1. Experimental setup
 
-**Update (2026-11-24)** — Same workstation, now at 1080p: **1920×1088 native (delivered as 1920×1080) / 24 FPS / 20 steps, 5s (124f), 7s (175f) and 8s (192f) all succeeded**, with native AAC stereo audio. The 8s run took **5,628s (93.8 min), peak VRAM 28.97GiB**. 10s (243f) is the hard ceiling on a 32GB card: VRAM hit 31.3G/31.86G, CUDA OOM, and the GNOME desktop crashed (framebuffer starvation) taking the machine down with it. Two root causes nailed down this round: stop `gdm3` before long generations (the desktop competes for VRAM), and restart the container to clear memory — `/free` cannot release the ~24G of anonymous memory left behind. Full report: [FULL-REPORT-1080p.md](FULL-REPORT-1080p.md). Community post: [Hugging Face discussion #76](https://huggingface.co/Comfy-Org/MiniMax-H3/discussions/76) (with 8s + 7s sample clips).
-
-## 关键结果
-
-| 项目 | 实测 |
+| Item | Value |
 |---|---|
-| GPU | AMD Radeon AI PRO R9700 32GB（`gfx1201`） |
-| 系统内存 | **48GB**（本案例的核心约束） |
-| 模型 | MiniMax H3 FL2VA **FP8** + Qwen3-VL **32B FP8** 文本编码器 |
-| 输出 | 608×352 / 24 FPS / **362 帧 / 15.083 秒** / 原生音频轨道 ×1 |
-| 采样 | 20 Steps |
-| 完整工作流耗时 | **442.26 秒** |
-| 容器内存峰值 | RAM 34.00GiB（达到容器上限）+ Swap 5.71GiB |
-| GPU 热点峰值 | 98°C（监控采样） |
-| Docker OOM Kill | **否** |
-| 核验方式 | MP4 逐帧解码：362 帧 / 24 FPS / 音频流 1 条 |
+| GPU | AMD Radeon AI PRO R9700 32 GB, gfx1201, 31.86 GiB reported |
+| Host | Ryzen 9 9950X, 48 GB RAM, ~23 GiB swap reported |
+| OS | Ubuntu 26.04.1 LTS, kernel 7.0.0-44 in campaign records |
+| Runtime | PyTorch 2.14.0+rocm10.1.0 / HIP 7.16.26385 |
+| Historical ComfyUI | v0.33.2, recorded commit `7cee3ceb1a35503172e0dfb8dbdbdedee2aba8aa` |
+| Current environment | Python 3.12.3, Triton 3.8.0; live ComfyUI checkout reports `nogit` |
+| Container | 34 GiB RAM / 42 GiB total memory+swap limit / 8 GiB shm |
+| GPU policy | 300 W cap, GNOME retained, current `--reserve-vram 3` |
+| Models | FL2VA pruned FP8-scaled, Qwen3-VL FP8, video VAE FP16, audio VAE FP32 |
 
-## 这份报告是什么、不是什么
+The historical image `ai-stack/comfyui-h3:rocm10.1-v1` is no longer the active production image. The current locally derived image is `ai-stack/comfyui-h3:with-extras`; these are local image tags, not a published image distribution.
 
-**是**：一份资源受限环境下的工程实践与故障排查记录——在 48GB 物理内存下，如何通过容器内存管理与 Swap 扩容，让完整 FP8 工作流（不降精度、不减步数、不用 Turbo）完成 15 秒生成。
+## 2. Benchmark results
 
-**不是**：
+### Generation (historical)
 
-- 不是 R9700 运行 H3 的首例（社区今年已有 Windows 与双卡案例，见下方对照）；
-- 不是新的推理算法或 ROCm 算子（模型、权重、工作流均为官方与社区现成成果）；
-- 不是性能基准（n=1，未做连续稳定性与更高分辨率验收）。
+| Native canvas | Frames | FPS | Steps / mode | Wall time (s) | Sampled peak VRAM (GiB) | Outcome |
+|---|---:|---:|---|---:|---:|---|
+| 1280×704 | 124 | 24 | 20 | 664.6 | — | PASS |
+| 1280×704 | 243 | 24 | 20 | 1962.1 | — | PASS |
+| 1920×1088 | 39 | 24 | 20 | 455.5 | — | PASS |
+| 1920×1088 | 124 | 24 | 20 | 2600.5 | ~27.8 | PASS |
+| 1920×1088 | 175 | 24 | 20 | 4759 | 27.96 | PASS |
+| 1920×1088 | 192 | 24 | 20 | 5628 | 28.97 | PASS |
+| 1920×1088 | 192 | 24 | Turbo 8 | 2358 | 28.97 | PASS |
+| 1920×1088 | 192 | 24 | Turbo 8 + EasyCache | 2364 | 28.91 | PASS; no observed speed benefit |
+| 1920×1088 | 192 | 24 | Turbo 4 | **1281** | 28.91 | PASS |
+| 1920×1088 | 243 | 24 | 20 | — | 31.3 | FAIL: allocation error + desktop disruption |
 
-它的受众：拥有 R9700 或类似 32GB AMD 显卡、系统 RAM 只有 32–64GB、想在 Linux 上跑完整大型视频模型的用户。读完最可能的收获不是新算法，而是少走几天弯路。
+The historical tests span more than one desktop/configuration state. `PASS` means a completed reported output, not a multi-run reliability guarantee. The 192-frame result is the largest successful point observed in this campaign, not the hardware's proven maximum. Intermediate legal 209 and 226 frames are not tested. The 20-to-4-step result is 4.39× faster, but changes the sampler and LoRA as well as steps. Turbo 8-to-4 is 1.84×. FP8 arithmetic and actual kernel dispatch are not yet confirmed.
 
-## 环境
+### Current production reservation
 
-| 项目 | 版本 / 配置 |
+| Configuration | Result |
 |---|---|
-| CPU | AMD Ryzen 9 9950X |
-| 系统 | Ubuntu 26.04.1 LTS |
-| 基础镜像 | `rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0` |
-| PyTorch | 2.14.0+rocm10.1.0 |
-| ComfyUI | v0.33.2（commit `7cee3ceb1a35503172e0dfb8dbdbdedee2aba8aa`） |
-| 模型文件 | DiT `minimax_h3_fl2va_pruned_fp8_scaled.safetensors`（19.52GiB）；编码器 `qwen3vl_32b_minimax_h3_fp8.safetensors`（24.71GiB）；Video VAE FP16（4.85GiB）；Audio VAE FP32（577MiB） |
-| 权重来源 | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)；编码器 [rzgar/qwen3-vl-32b-minimax-h3-fp8-comfyui](https://huggingface.co/rzgar/qwen3-vl-32b-minimax-h3-fp8-comfyui) |
+| 1920×1088 / 124 frames / 20 steps / GNOME on / reserve3 | PASS, 2613 s, desktop retained, no observed reboot |
+| 1920×1088 / 192 frames / Turbo 4 / reserve3 | No valid completed benchmark in reviewed P0 evidence |
+| P0 experimental instance with production still running | ABORTED; not eligible for performance comparison |
 
-> 复现限制：本机下载时的 HF revision 与模型 SHA-256 未完整留档；本地构建镜像的完整 Dockerfile 未公开。因此本文是**实测记录**，不是一键复现包。补齐清单见文末。
+The 2,613 s result is only 12.5 s above the historical 2,600.5 s result (~0.48% raw difference); the controlled overhead is unknown. A separate internal note quotes 11% without a matching denominator. Do not extrapolate either value to the 192-frame workload.
 
-## 最有价值的三个发现
+## 3. Checkpoints and workflow
 
-**1. 48GB 内存也能跑完完整工作流。** 主流指南通常默认 64GB 起步。本案例证明：48GB 物理 RAM + 合理容器限额 + SSD Swap + 模型卸载流程，可以完成 362 帧满时长生成，不必先加钱买内存。
+| Component | Filename |
+|---|---|
+| H3 | `minimax_h3_fl2va_pruned_fp8_scaled.safetensors` |
+| Qwen | `qwen3vl_32b_minimax_h3_fp8.safetensors` |
+| Video VAE | `minimax_h3_video_vae_fp16.safetensors` |
+| Audio VAE | `minimax_h3_audio_vae_fp32.safetensors` |
+| Turbo LoRA | `minimax_h3_turbo_v4_step600_ema.safetensors` |
+| RIFE (optional) | `rife426.pkl` |
+| ESRGAN (optional) | `RealESRGAN_x4.pth` |
 
-**2. 三种「内存不足」不是一回事，必须分开看。**
-- GPU 显存不足（VRAM）：本次 32GB 全程不是瓶颈；
-- Docker cgroup 限额：容器 RAM 与容器 Swap 是两个独立额度，且受 `RAM+Swap 总限额` 约束；
-- 宿主机 Swap 耗尽：会在 Qwen 编码器加载阶段先爆。
-一个可教学的反面案例：把容器 RAM 从 34GiB 提到 38GiB、总限额仍锁 42GiB 时，容器可用 Swap 反而从 8GiB 被压缩到 4GiB，问题更严重——最终恢复 34GiB 基线才对。
+Do not download these again if already available; obtain checkpoints only from the corresponding upstream distribution under its applicable terms. The project does not redistribute model weights.
 
-**3. 分阶段数据比一张成功截图有用。** 39 → 124 → 209 → 294 → 362 帧逐级推进，每阶段保留耗时、内存峰值、失败条件；其中 294 帧的两次中止经查是安全监控因整机 Swap 不足主动停机（`OOMKilled=false`），不是模型 OOM——误判会把人引向完全错误的修复方向。
-
-## 实验数据（相同模型与参数：608×352 / 24 FPS / 20 Steps）
-
-| 阶段 | 帧数 | 时长 | 工作流耗时 | 结果 |
-|---|---:|---:|---:|---|
-| `--cache-none` + `--fast-disk` | 39 | 1.625s | 97.14s | 成功；Swap 峰值 ≈5.74GiB |
-| 去掉 `--fast-disk` | 39 | 1.625s | 86.74s | 成功；Swap 峰值 ≈5.22GiB |
-| 逐级放大 | 124 | 5.167s | 138.25s | 成功；解码 124 帧 + 音频 1 条 |
-| 逐级放大 | 209 | 8.708s | 217.74s | 成功；解码 209 帧 + 音频 1 条 |
-| Swap 扩容前 | 294（目标） | — | — | 两次在 Qwen 加载阶段被安全监控主动中止（整机 Swap 见底），非生成失败 |
-| 宿主机 +16GiB Swap 后 | 294 | 12.25s | 332.99s | 成功 |
-| **最终** | **362** | **15.083s** | **442.26s** | **成功；MP4 逐帧核验通过** |
-
-失败路径摘要：原生 venv 先卡在 ROCm 动态库（`libroctracer64.so` 缺失）→ 改走 Docker ROCm 镜像；30GiB 容器跑完整流程 OOM → H3-only 单独加载成功，锁定问题在 **Qwen 32B 编码器 → H3 DiT 的切换峰值**，而非单个模型装不下。
-
-## 最终成功配置
-
-**宿主机**：物理 RAM 48GB；系统 Swap 合计 ≈23.5GiB（原 ≈8GiB + 新增 16GiB SSD swapfile）。
-
-**Docker 基线**（容器名 `comfyui-h3-34g-nofastdisk`）：
+The P0 log captured the following four-step workflow:
 
 ```text
-镜像（本地构建）：ai-stack/comfyui-h3:rocm10.1-v1
---memory=34g            # 容器 RAM 上限
---memory-swap=42g       # RAM+Swap 总限额 → 容器可用 Swap 8GiB
---shm-size=8g
---device=/dev/kfd --device=/dev/dri   # GPU 透传；设备组号按本机实际
-端口：127.0.0.1:8190 → 8190（仅本机映射）
-模型目录只读 bind mount；缓存 / 输入 / 输出独立挂载
+UNETLoader + CLIPLoader(type=minimax)
+  -> MiniMaxH3ImageToVideo(width=1920, height=1088, length=192)
+  -> MiniMaxH3TurboLoRA(strength=1.0, low_vram=True)
+  -> BasicGuider + BasicScheduler(simple, steps=4, denoise=1.0)
+  -> MiniMaxH3TurboSampler + RandomNoise(seed=8112026)
+  -> SamplerCustomAdvanced
+  -> VAEDecodeTiled(tile=512, overlap=64, temporal=64, temporal_overlap=8)
+  + VAEDecodeAudio -> CreateVideo(fps=24, bit_depth=8)
+  -> SaveVideo(format=mp4, codec=auto)
 ```
 
-**ComfyUI 启动关键参数**：
+This is a logical dependency summary, not executable JSON. Use the archived workflow JSON for exact node connections. Captured prompt:
+
+> A tiny brass robot carefully waters a glowing mushroom garden at night. Gentle rain, soft mechanical movements, warm lantern light. Audio: quiet rain, small servo sounds, and a soft bell chime. No text or logos.
+
+The chosen native canvases are 1280×704 and 1920×1088. Tested frame counts follow `17k+5`. Resize to standard 720p/1080p only after generation; do not confuse a resized delivery file with exact native sampling dimensions.
+
+## 4. Operational guidance (existing deployment only)
+
+These commands inspect the author's existing production setup. They do not install a new environment or prove that an arbitrary host supports the workflow. Adjust the container name and paths for your own authorized instance.
 
 ```bash
-python3 main.py --listen 0.0.0.0 --port 8190 --disable-auto-launch \
-  --disable-pinned-memory --cache-none
-# 不使用 --fast-disk
+# Read-only checks; run before any submission.
+docker ps --format '{{.Names}} {{.Status}}'
+curl -sS -m 30 -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:8190/system_stats
+free -h
+rocm-smi --showmeminfo vram --json
 ```
 
-> 注意：不能把成功完全归因于某一个旗标——各轮测试之间缓存与驻留状态并不完全一致。这是经实测成功的**组合**，不是严格单因素的因果证明。
+Keep GNOME active, reserve3 unchanged, the power cap at 300 W and the current software versions frozen. Do not start a second inference container while production is running. Do not stop/mask the display manager, change the GPU selection, use `swapoff` under pressure, or retry the known failure workload merely for benchmarking. If available host memory approaches the project's 6 GiB stop gate, stop safely before continuing. Temperature and frequency must be monitored with the sensor type identified; the campaign's 94–96 °C measurements do not establish a universal safe temperature limit.
 
-## 诊断速查
+The existing local automation uses `h3-cleanup.py` to restart the idle container and `h3-720p-test.py <workflow.json> <name>` to submit jobs. Before executing either, inspect the script and confirm there are no active jobs, verify the correct container name and confirm the monitoring gates. These scripts are not embedded in this README or asserted to be available in the public repository. Avoid short liveness checks (3 s previously gave false failure indications); the documented production workflow uses 30 s.
+
+### Verify an output
 
 ```bash
-free -h && swapon --show                                   # 宿主机 RAM / Swap
-sudo docker inspect <容器> --format 'RAM={{.HostConfig.Memory}} RAM+Swap={{.HostConfig.MemorySwap}} OOM={{.State.OOMKilled}}'
-rocm-smi --showtemp --showfan --showpower --showuse        # GPU 状态
-# 容器 cgroup 实际用量（含 swap.current / memory.events）见 FULL-REPORT.md 第 6 节
+ffprobe -v error -count_frames \
+  -show_entries stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames,start_time,duration,channels,sample_rate \
+  -show_entries format=duration -of json output.mp4
 ```
 
-判断顺序建议：先看 `OOMKilled` 与 cgroup 事件，再看宿主机 Swap 余量，最后才怀疑显存与驱动——本次内核日志出现过 AMDGPU HMM/SVM 调用栈，但证据不支持把驱动定为根因。
+For frame alignment, additionally export video frame timestamps (`ffprobe -select_streams v:0 -show_frames ...`) and inspect audio start/end time, not just nominal FPS and frame counts. A successful MP4 container is not a proof of audiovisual synchronization or visual quality equivalence.
 
-## 与已有社区工作的关系
+## 5. Known failures and workarounds
 
-本案例建立在社区已有工作之上，主要区别在约束条件与问题域：
-
-| 维度 | 已有社区案例 | 本案例 |
+| Observation | Evidence / interpretation | Current response |
 |---|---|---|
-| R9700 运行 H3 | 已有实现 | 非首例 |
-| 15 秒 / 362 帧 | 已有公开记录（如 AMD-Pro-Bench，864×480、W4A8 Turbo、8 步等不同条件） | 608×352、FP8、20 步，条件不同，不直接比速度 |
-| 系统内存 | 有案例 128GB | **48GB** |
-| ROCm 环境 | 多为 ROCm 7.2 / Windows / 双卡 | **ROCm 10.1 + Docker / Ubuntu / 单卡** |
-| 主要方向 | GPU 推理性能、量化、算子补丁 | **主机与容器内存管理、Swap 调度** |
-| 资料形态 | 侧重性能结果 | **完整失败与修复路径** |
+| GPU allocation failure at 243 frames | ~31.3 GiB sampled VRAM; PyTorch OOM | Do not intentionally reproduce |
+| GNOME/GDM disruption | AMDGPU framebuffer pin ENOMEM, repeated sessions, reboot | Keep desktop; fixed application-level reserve3; tested at 124 frames |
+| Residual anonymous memory | `/free` unchanged over 90 s; restart 28.5→0.62 GiB | Restart only after active jobs end; verify memory and API |
+| Dynamic LoRA injection | gfxhub page fault + exit 139 | `low_vram=True` merge mode |
+| AAC/PyAV failure | `avcodec_send_frame() returned 22` | `codec=auto` in tested workflow |
+| RIFE checkpoint mismatch | missing `encode.cnn3.weight` | v4.26 + IFNet key remapping + corrected forward signature |
+| Incorrect timing parser | whole prompt dict treated as node ID | No phase timing; repair and validate collector before future authorized P0 |
+| Concurrent test/production instances | host available RAM fell to 736 MiB; safety abort | One active inference instance; no new performance record |
 
-致谢与来源说明（哪些来自已有资料，哪些是本机实验）：
+## 6. Post-processing (separate from native diffusion)
 
-- 模型权重与 FP8 适配：[Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[rzgar 的 Qwen3-VL 32B FP8 编码器](https://huggingface.co/rzgar/qwen3-vl-32b-minimax-h3-fp8-comfyui)；
-- 单卡 R9700 的 H3 优化与编码器卸载研究：[boxwrench/R9700](https://github.com/boxwrench/R9700)；
-- R9700 视频推理补丁（128GB 内存环境）：[charlie12345/R9700AIProComfyUIPatch](https://github.com/charlie12345/R9700AIProComfyUIPatch)；
-- `--cache-none` / `--fast-disk` 与编码器宿主内存驻留问题：Hugging Face `Comfy-Org/MiniMax-H3` 讨论区已有讨论在先；
-- 本机独立完成的部分：48GB 约束下的容器 RAM/Swap 配比实验、38GiB 反例、宿主机 Swap 扩容决策、分阶段帧数推进与全部实测数据。
+All branches use `turbo-8s-easycache_00001_.mp4` as the source. A2 contains A1; B2 contains B1. The reported times must not be represented as a measured four-step-plus-postprocessing pipeline.
 
-## 局限（发布时不删）
+| Branch | Raster / FPS / frames | Time (s) |
+|---|---|---:|
+| A1 — FFmpeg interpolation + unsharp/CAS | 1920×1088 / 48 / 381 | 62 |
+| S1 — Real-ESRGAN GPU | 2560×1451 / 24 / 192 | 653 |
+| A2 — A1 + ESRGAN | 2560×1451 / 48 / 381 | 1302 |
+| B1 — RIFE v4.26 | 1920×1088 / 48 / 383 | 138 |
+| B2 — B1 + ESRGAN | 2560×1451 / 48 / 379 | 1359 |
 
-- 362 帧仅成功验收 **1 次**；未做连续多轮稳定性测试；
-- 分辨率：15 秒档 608×352 低于 H3 原生 768 短边；1080p 档见 FULL-REPORT-1080p.md（5/7/8 秒成功，10 秒为显存上限）；
-- 模型 revision / SHA-256、完整 Dockerfile、可直接运行的工作流 JSON 尚未补齐——可复现程度目前为**中等**；
-- 温度与功耗各有一处未决读数（GUI 103°C vs 终端 97°C；`power1_average` 曾采到 389W 而 cap 为 300W），口径未统一，不据此下结论；
-- 音频仅核验轨道存在，未做可听性与同步的主观验收。
+A1 is the documented classical-filter path:
 
-## 后续补齐清单
+```bash
+ffmpeg -i source.mp4 -vf \
+  'unsharp=5:5:0.25:5:5:0.05,minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,cas=strength=0.25' \
+  -c:v libx264 -crf 17 -preset medium -c:a copy A1-ffmpeg-48fps.mp4
+```
 
-- [ ] 完整 Dockerfile 与依赖锁定
-- [ ] 模型文件 SHA-256 与 HF revision 记录
-- [ ] 完整工作流 JSON
-- [ ] 内存时序日志（cgroup / rocm-smi 采样）
-- [ ] 连续多轮稳定性复测
+RIFE and ESRGAN use the author's custom `rife_batch.py` and `sr_batch.py` in the existing container; release the actual inspected scripts and dependency versions before claiming turnkey reproduction. The RIFE replacement had 198 keys, `head_ch=4`, `channels=[192,128,96,64,32]`; key mapping strips `module.`/`flownet.` and maps `blockN.` to `blocks.N.`. The call is `forward(img0, img1, timestep=0.5)`.
 
-## 样片
+Known limitation: A1/B1/B2 differ in frame count. The four-frame B1→B2 change is unresolved; inspect frame timestamps and audio duration. The reported odd output height (1451) also requires pixel-format/encoding verification. Operator inspection of selected frames is qualitative only. ESRGAN GPU (~3.4 s/frame) vs CPU ONNX Runtime (~169 s/frame) is a cross-implementation comparison, not an isolated hardware speedup.
 
-`sample-r9700-h3-15s.mp4`：608×352 / 24 FPS / 362 帧 / 15.083 秒 / 含原生音频（约 0.9MB）。可通过本仓库的 **Releases** 下载，或在 Hugging Face 讨论帖中直接观看。
+## 7. P0 diagnostic status
 
-`sample-r9700-h3-1080p-8s.mp4` / `sample-r9700-h3-1080p-7s.mp4`：1920×1080 / 24 FPS / 8.000 秒 / 7.292 秒 / 含原生音频（各约 4MB）。可在 Hugging Face 讨论帖 [#76](https://huggingface.co/Comfy-Org/MiniMax-H3/discussions/76) 中直接观看。
+**P0 incomplete; P1 not started.** The current freeze records reserve3 and the image/workflow configuration, but H3 and Qwen hash lookups failed. `rocprofv3` was unavailable. FP8 storage and source quantization code were identified; actual native FP8 arithmetic, SDPA dispatch and hotspot rankings remain unknown. TunableOp was not established as active. The experimental run ended without a usable benchmark: host MemAvailable 14 GiB → 736 MiB, swap 5.7→15 GiB, sampled GPU VRAM 30.5 GiB; after stopping/removing the test instance, host available memory returned to 19 GiB and the production API to HTTP 200. The timing log records the whole workflow dictionary instead of separate nodes. No new speedup is claimed.
 
-## 文件
+## 8. Evidence and release layout
 
-- [FULL-REPORT.md](FULL-REPORT.md) — 完整复盘原文：时间线、全部实验、诊断命令、问题速查表（333 行）
-- [POST.md](POST.md) — 社区发帖文案（Hugging Face 讨论版 / 简介版）
-- [FULL-REPORT-1080p.md](FULL-REPORT-1080p.md) — 1080p 完整复盘原文（2026-11-24）：5/7/8 秒成功、10 秒显存上限、桌面抢显存与清内存根因
-- [POST-1080p.md](POST-1080p.md) — 1080p 社区发帖文案（Hugging Face 讨论 #76 / 简介版）
+The following is a **proposed publication layout**, not a claim that all files are already public. Preserve the original evidence and build a separate redacted public copy.
+
+```text
+README.md
+paper.md
+paper.pdf
+benchmarks.csv
+720p-data/              # existing workflow JSON, TSVs, SHA256SUMS, sample MP4s
+figures/                # historical native/delivered sample frames and clips
+postprocessing/         # selected source and A1/S1/A2/B1/B2 samples
+p0/                     # redacted freeze, audit, invalid timing log, abort report
+workflows/              # exact reviewed 1080p API JSONs, if recovered
+scripts/                # reviewed automation and post-processing scripts, if recovered
+SHA256SUMS.txt           # generated for the released files, after redaction
+```
+
+The source archive includes the first four evidence categories and P0 reports, but the full 1080p workflow/script bundle and all main checkpoint hashes still need verification. Do not publish personal account names, authentication prompts, private service identifiers, private absolute paths, unrelated control-plane source, or local credentials. Keep internal storage locations out of the public README. Do not claim that the new manuscript, videos or raw logs are already public until the repository release has been verified.
+
+## 9. Related work, scope and transparency
+
+Relevant upstream/community projects include [Comfy-Org H3](https://huggingface.co/Comfy-Org/MiniMax-H3), [boxwrench/R9700](https://github.com/boxwrench/R9700) and [SyncTile H3](https://github.com/alaintural/synctile-h3). Their tasks and pipelines may differ. This repository is a single-system engineering record, not a comprehensive literature survey. No global-first or fastest-GPU claim is made.
+
+Generative AI tools assisted with experimental planning, scripting and agent-driven execution, log interpretation and writing. Measurements come from the reported physical workstation; the human author must verify the evidence and approve final publication. No model weights are included in this proposed release. Apply an appropriate license to original code/documentation only after checking ownership and upstream terms; third-party artifacts retain their respective licenses.
